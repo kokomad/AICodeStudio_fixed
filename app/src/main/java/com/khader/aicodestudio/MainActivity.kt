@@ -29,6 +29,9 @@ class MainActivity : Activity() {
     private val CARD = Color.parseColor("#141414")
     private val MUTED = Color.parseColor("#A0A0A0")
 
+    private val DEFAULT_MODEL = "gemini-3.8-flash"
+    private val FALLBACK = "gemini-flash-latest"
+
     private val up = " UPGRADE the program, do not only fix it: add the missing Android permissions/features (AndroidManifest), settings, features and properties your specialty needs, so the app becomes more luxurious and more useful to the user. Keep every existing feature working and keep the code compilable."
     private val agents = listOf(
         Triple("🛠️", "خبير الأكواد", "You are an expert software engineer." + up + " Specialty: fix bugs and compile errors, refactor, null-safety, error handling, performance (threads, memory, caching), lifecycle safety, runtime permission requests, state saving, add useful utilities, extra settings and required dependencies."),
@@ -52,7 +55,6 @@ class MainActivity : Activity() {
     private val checks = ArrayList<CheckBox>()
     @Volatile private var thinkCfg = true
     @Volatile private var maxTok = 65536
-    private val FALLBACK = "gemini-2.5-flash"
     private val errMsgs = arrayOfNulls<String>(agents.size)
     private lateinit var connCard: LinearLayout
     private var summary = ""
@@ -63,6 +65,9 @@ class MainActivity : Activity() {
     private val exts = setOf("kt","java","xml","gradle","kts","json","txt","md","properties","html","js","css","glsl","vert","frag","yml","yaml","toml","pro","cfg","ts","py","c","cpp","h","cs")
     private val singleMode = " Reply with the COMPLETE updated code ONLY, no markdown fences. At the very top put an Arabic comment: changelog + list of permissions/dependencies to add."
     private val projMode = " The input is a multi-file project; each file starts with a line '=== FILE: path ==='. Reply ONLY with files you modified or added, each preceded by the same marker line followed by the FULL new content of that file. You may add new files and edit AndroidManifest.xml / build.gradle for permissions and dependencies. Omit unchanged files. No markdown fences, no explanations."
+
+    private fun resolveModel(): String =
+        model.text.toString().trim().removePrefix("models/").ifBlank { DEFAULT_MODEL }
 
     private fun clip(v: android.view.View, r: Int) {
         v.outlineProvider = object : ViewOutlineProvider() { override fun getOutline(view: android.view.View, o: Outline) { o.setRoundRect(0, 0, view.width, view.height, dp(r).toFloat()) } }
@@ -137,8 +142,9 @@ class MainActivity : Activity() {
         })
 
         // الإعدادات
+        val savedModel = sp.getString("m", DEFAULT_MODEL)?.trim()?.removePrefix("models/")?.ifBlank { DEFAULT_MODEL } ?: DEFAULT_MODEL
         key = field("مفتاح Gemini API (AQ... أو AIza...)", true).apply { setText(sp.getString("k", "")) }
-        model = field("النموذج").apply { setText(sp.getString("m", "gemini-flash-latest")) }
+        model = field("النموذج (مثال: $DEFAULT_MODEL)").apply { setText(savedModel) }
         testMsg = TextView(this).apply { text = "لم يتم الاختبار بعد"; setTextColor(MUTED); textSize = 12f; setPadding(dp(4), dp(6), dp(4), dp(2)) }
         testBtn = btn("🔍 فحص المفتاح") { testConnection(sp) }.apply { layoutParams = LinearLayout.LayoutParams(-1, dp(48)).apply { setMargins(0, dp(2), 0, dp(2)) } }
         connCard = card().apply { addView(label("🔑 إعدادات المفتاح")); addView(key); addView(model); addView(testBtn); addView(testMsg) }
@@ -270,7 +276,7 @@ class MainActivity : Activity() {
         val raw = s.take(200)
         return when {
             s.contains("HTTP 429") -> "تجاوزت حدّ الطلبات/الحصة لدى Gemini. انتظر دقيقة ثم أعد المحاولة، أو بدّل النموذج. [$raw]"
-            s.contains("HTTP 404") -> "النموذج غير موجود، غيّر اسمه من الإعدادات. [$raw]"
+            s.contains("HTTP 404") -> "النموذج غير موجود أو غير متاح، غيّر اسمه من الإعدادات (مثلاً $DEFAULT_MODEL). [$raw]"
             s.contains("HTTP 401") || s.contains("HTTP 403") -> "المفتاح مرفوض أو غير مفعّل. [$raw]"
             s.contains("HTTP 400") && s.contains("API key", true) -> "المفتاح غير صالح. [$raw]"
             s.contains("HTTP 500") || s.contains("HTTP 502") || s.contains("HTTP 503") || s.contains("HTTP 504") -> "خوادم Google مشغولة حالياً، أعد المحاولة بعد قليل. [$raw]"
@@ -281,20 +287,19 @@ class MainActivity : Activity() {
 
     private fun progress(i: Int, label: String): (Int) -> Unit {
         var last = 0
-        return { n -> if (n < last || n - last > 800) { last = n; chip(i, "$label $n", AMBER) } }
+        return { n -> if (n < last || n - last > 800) { last = n; chip(i, "$label$n", AMBER) } }
     }
 
     private fun cleanKey() = key.text.toString().filter { !it.isWhitespace() && it != '"' && it != '\'' }
 
     private fun testConnection(sp: SharedPreferences) {
         val k = cleanKey()
-        val m = model.text.toString().trim().removePrefix("models/").ifBlank { "gemini-flash-latest" }
+        val m = resolveModel()
         if (k.length < 20) { testMsg.text = "❌ أدخل المفتاح أولاً"; testMsg.setTextColor(Color.parseColor("#F44336")); return }
         testBtn.isEnabled = false; testMsg.text = "⏳ جارٍ الفحص…"; testMsg.setTextColor(AMBER)
         Thread {
             var ok = false
             val msg = try {
-                // طلب GET خفيف (بدون توليد) لفحص المفتاح والنموذج خلال ثوانٍ
                 val c = URL("https://generativelanguage.googleapis.com/v1beta/models/$m").openConnection() as HttpURLConnection
                 c.connectTimeout = 8000; c.readTimeout = 8000
                 c.setRequestProperty("x-goog-api-key", k)
@@ -308,7 +313,7 @@ class MainActivity : Activity() {
                     code == 429 -> "⚠️ المفتاح صحيح لكن تجاوزت الحصة"
                     code == 400 && em.contains("key", true) -> "❌ المفتاح غير صالح"
                     code == 401 || code == 403 -> "❌ المفتاح مرفوض أو غير مفعّل: ${em.take(120)}"
-                    else -> "❌ HTTP $code ${em.take(120)}"
+                    else -> "❌ HTTP $code${em.take(120)}"
                 }
             } catch (e: java.net.SocketTimeoutException) { "❌ انتهت المهلة، تحقق من الإنترنت أو الـ VPN"
             } catch (e: java.net.UnknownHostException) { "❌ لا يوجد اتصال بالإنترنت"
@@ -342,7 +347,7 @@ class MainActivity : Activity() {
             if (t.isBlank()) { toast("أدخل الكود أولاً"); return }
             orig["code"] = t
         }
-        val m = model.text.toString().trim().removePrefix("models/").ifBlank { "gemini-flash-latest" }
+        val m = resolveModel()
         sp.edit().putString("k", k).putString("m", m).apply()
         zipOut = proj
         val judging = useJudge && sel.size > 1
@@ -352,10 +357,9 @@ class MainActivity : Activity() {
         val green = Color.parseColor("#4CAF50"); val red = Color.parseColor("#F44336")
         Thread {
             val payload = if (proj) pack(orig) else orig["code"]!!
-            val props = arrayOfNulls<Map<String, String>>(specs.size)
+            val props = arrayOfNulls>(specs.size)
             val errs = errMsgs; errs.fill(null)
             val done = java.util.concurrent.atomic.AtomicInteger(0)
-            // خبيران كحدّ أقصى في نفس الوقت: تشغيل الكل دفعة واحدة كان يسبّب خطأ 429 (تجاوز حدّ الطلبات)
             val gate = java.util.concurrent.Semaphore(2)
             sel.map { i ->
                 Thread {
@@ -372,7 +376,7 @@ class MainActivity : Activity() {
                 }.also { it.start() }
             }.forEach { it.join() }
             val ok = sel.filter { props[it] != null }
-            val allErr = sel.filter { errs[it] != null }.joinToString("\n") { "• ${specs[it].second}: ${errs[it]}" }
+            val allErr = sel.filter { errs[it] != null }.joinToString("\n") { "• ${specs[it].second}:${errs[it]}" }
             try {
                 if (ok.isEmpty()) throw Exception(allErr.ifBlank { "فشل جميع الخبراء" })
                 val fin = LinkedHashMap(orig)
@@ -416,7 +420,6 @@ class MainActivity : Activity() {
             catch (e: java.net.UnknownHostException) { throw Exception("لا يوجد اتصال بالإنترنت") }
             catch (e: Exception) {
                 val t = e.message ?: ""
-                // خطأ 400: خفّف الإعدادات تدريجياً (إلغاء التفكير ثم خفض الحد الأقصى للمخرجات)
                 if (t.contains("HTTP 400") && !t.contains("API key", true)) {
                     if (thinkCfg) { thinkCfg = false; continue }
                     if (maxTok > 32768) { maxTok = 32768; continue }
@@ -426,8 +429,9 @@ class MainActivity : Activity() {
                 val quotaOut = t.contains("PerDay", true) || t.contains("limit: 0")
                 val busy = t.contains("HTTP 429") || t.contains("HTTP 500") || t.contains("HTTP 502") || t.contains("HTTP 503") || t.contains("HTTP 504")
                 n++
-                // التحويل لنموذج بديل (حصة منفصلة) عند عدم وجود النموذج أو الضغط المتكرر
-                if (!fellBack && mm != FALLBACK && (is404 || (busy && (n >= 2 || quotaOut)))) { mm = FALLBACK; fellBack = true; n = 0; continue }
+                if (!fellBack && mm != FALLBACK && (is404 || (busy && (n >= 2 || quotaOut)))) {
+                    mm = FALLBACK; fellBack = true; n = 0; continue
+                }
                 val timeout = e is java.net.SocketTimeoutException
                 val retry = !quotaOut && (busy || t.contains("رد فارغ") || e is java.io.IOException)
                 if (retry && n < (if (timeout) 3 else 5)) {
@@ -454,7 +458,7 @@ class MainActivity : Activity() {
             .put("systemInstruction", JSONObject().put("parts", JSONArray().put(JSONObject().put("text", sys))))
             .put("contents", JSONArray().put(JSONObject().put("role", "user").put("parts", JSONArray().put(JSONObject().put("text", user)))))
             .put("generationConfig", gen)
-        val c = URL("https://generativelanguage.googleapis.com/v1beta/models/$m:streamGenerateContent?alt=sse").openConnection() as HttpURLConnection
+        val c = URL("[https://generativelanguage.googleapis.com/v1beta/models/$m:streamGenerateContent?alt=sse](https://generativelanguage.googleapis.com/v1beta/models/$m:streamGenerateContent?alt=sse)").openConnection() as HttpURLConnection
         c.requestMethod = "POST"; c.doOutput = true; c.connectTimeout = 20000; c.readTimeout = 180000
         c.setRequestProperty("Content-Type", "application/json")
         c.setRequestProperty("x-goog-api-key", k)
@@ -463,7 +467,7 @@ class MainActivity : Activity() {
         if (code !in 200..299) {
             val txt = c.errorStream?.bufferedReader()?.readText() ?: ""
             val msg = try { JSONObject(txt).getJSONObject("error").getString("message") } catch (e: Exception) { "" }
-            throw Exception("HTTP $code ${msg.take(300)}")
+            throw Exception("HTTP $code [$m] ${msg.take(300)}")
         }
         val sb = StringBuilder()
         var finish = ""; var block = ""
@@ -474,8 +478,7 @@ class MainActivity : Activity() {
                 val j = line.removePrefix("data:").trim()
                 if (j.isEmpty() || j == "[DONE]") continue
                 val o = try { JSONObject(j) } catch (e: Exception) { continue }
-                // أخطاء قد تصل داخل البث نفسه
-                o.optJSONObject("error")?.let { er -> throw Exception("HTTP ${er.optInt("code", 500)} ${er.optString("message").take(300)}") }
+                o.optJSONObject("error")?.let { er -> throw Exception("HTTP ${er.optInt("code", 500)} [$m] ${er.optString("message").take(300)}") }
                 o.optJSONObject("promptFeedback")?.optString("blockReason")?.takeIf { it.isNotEmpty() }?.let { block = it }
                 val cand = o.optJSONArray("candidates")?.optJSONObject(0) ?: continue
                 cand.optString("finishReason").takeIf { it.isNotEmpty() && it != "null" }?.let { finish = it }
